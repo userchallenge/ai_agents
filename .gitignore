@@ -4,7 +4,7 @@ config/
 tmp_output/
 *.sqlite
 ai_agents/output_files/
-/ai_agents/token.pickle
+token.pickle
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

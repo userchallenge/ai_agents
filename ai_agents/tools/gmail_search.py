@@ -173,19 +173,20 @@ def fetch_gmail_messages(service, query, max_results=10):
         return []
 
 
-def convert_message_to_simple_format(message):
+def convert_message_to_simple_format(message, date_format="iso"):
     """
     Convert a Gmail message object to simplified format matching search_emails output.
     
     Args:
         message (dict): Full Gmail message object from API
+        date_format (str): Format for date field - "iso" for ISO string, "datetime" for datetime object
         
     Returns:
         dict: Simplified message format containing:
             - id: Gmail message ID
             - subject: Email subject line
             - sender: From header value
-            - date: Date in ISO format (YYYY-MM-DDTHH:MM:SS+TZ) or None if parsing fails
+            - date: Date in specified format or None if parsing fails
             - body_text: Full formatted body text content
             
     Note:
@@ -202,12 +203,15 @@ def convert_message_to_simple_format(message):
         )
         date_raw = next((h["value"] for h in headers if h["name"] == "Date"), "No Date")
         
-        # Convert date to ISO format
+        # Convert date to requested format
         try:
             from email.utils import parsedate_to_datetime
             if date_raw != "No Date":
                 date_obj = parsedate_to_datetime(date_raw)
-                date = date_obj.isoformat()
+                if date_format == "datetime":
+                    date = date_obj
+                else:  # default to "iso"
+                    date = date_obj.isoformat()
             else:
                 date = None
         except:
@@ -273,7 +277,7 @@ def format_filename(message):
     return f"email_{date_str}_{sender_clean}.json"
 
 
-def find_email_by_subject(service, subject, save_to_json=False, include_raw_data=False):
+def find_email_by_subject(service, subject, save_to_json=False, include_raw_data=False, date_format="iso"):
     """
     Find the first email matching a subject line and return simplified format.
 
@@ -283,6 +287,8 @@ def find_email_by_subject(service, subject, save_to_json=False, include_raw_data
         save_to_json (bool, optional): Whether to save full message to JSON file. Defaults to False.
         include_raw_data (bool, optional): Whether to include raw base64 data in JSON (only if save_to_json=True).
                                          Defaults to False.
+        date_format (str, optional): Format for date field - "iso" for ISO string, "datetime" for datetime object.
+                                   Defaults to "iso".
 
     Returns:
         dict or None: Simplified message format matching search_emails output:
@@ -306,7 +312,7 @@ def find_email_by_subject(service, subject, save_to_json=False, include_raw_data
         message = messages[0]  # Get first match
         
         # Convert to simplified format using helper method
-        simple_format = convert_message_to_simple_format(message)
+        simple_format = convert_message_to_simple_format(message, date_format)
         
         # Optionally save to JSON file
         if save_to_json and simple_format:
@@ -334,7 +340,7 @@ def find_email_by_subject(service, subject, save_to_json=False, include_raw_data
     return None
 
 
-def search_emails(service, query, max_results=10):
+def search_emails(service, query, max_results=10, date_format="iso"):
     """
     Search emails using Gmail query syntax and return summary information.
 
@@ -342,6 +348,8 @@ def search_emails(service, query, max_results=10):
         service (googleapiclient.discovery.Resource): Authenticated Gmail API service
         query (str): Gmail search query string (e.g., "invoice", "from:example.com")
         max_results (int, optional): Maximum number of emails to return. Defaults to 10.
+        date_format (str, optional): Format for date field - "iso" for ISO string, "datetime" for datetime object.
+                                   Defaults to "iso".
 
     Returns:
         list: List of dictionaries, each containing:
@@ -367,7 +375,7 @@ def search_emails(service, query, max_results=10):
     # Convert each message to simplified format using helper method
     email_list = []
     for message in messages:
-        simple_format = convert_message_to_simple_format(message)
+        simple_format = convert_message_to_simple_format(message, date_format)
         if simple_format:
             email_list.append(simple_format)
 
