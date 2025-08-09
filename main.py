@@ -1,11 +1,15 @@
 import os
+import argparse
 from datetime import datetime, date
 from dateutil.parser import parse as parse_date
-from typing import Optional
+from typing import Optional, List
 
 import instructor
 from atomic_agents.agents.atomic_agent import AgentConfig, AtomicAgent, BaseIOSchema
-from atomic_agents.context.system_prompt_generator import SystemPromptGenerator
+from atomic_agents.context.system_prompt_generator import (
+    SystemPromptGenerator,
+    BaseDynamicContextProvider,
+)
 from dotenv import load_dotenv
 from google import genai
 from instructor.multimodal import PDF
@@ -101,6 +105,84 @@ class OrderExtractionResult(BaseIOSchema):
             return None  # Return None for unknown types
 
 
+# ============================================================================
+# EMAIL CATEGORIZATION AGENT COMPONENTS
+# ============================================================================
+
+
+class EmailCategorizationResult(BaseIOSchema):
+    """Email categorization result."""
+
+    date: Optional[str] = Field(
+        default=None, description="Email date in ISO format or null if not found"
+    )
+    subject: Optional[str] = Field(
+        default=None, description="Email subject or null if not found"
+    )
+    sender: Optional[str] = Field(
+        default=None, description="Email sender address or null if not found"
+    )
+    body: Optional[str] = Field(
+        default=None, description="Email body text or null if not found"
+    )
+    categories: List[str] = Field(
+        default_factory=list,
+        description="List of applicable categories: Friends, Family, Suppliers, Job Applications, Events",
+    )
+
+
+class EmailContextProvider(BaseDynamicContextProvider):
+    """Context provider for email categorization with known contacts and domains."""
+
+    def __init__(
+        self,
+        known_family_senders: Optional[List[str]] = None,
+        known_friends_senders: Optional[List[str]] = None,
+        last_name: Optional[str] = None,
+        supplier_domains: Optional[List[str]] = None,
+        extra_keywords: Optional[List[str]] = None,
+    ):
+        self.title = "Email Context"  # Required by atomic-agents framework
+        self.known_family_senders = known_family_senders or []
+        self.known_friends_senders = known_friends_senders or []
+        self.last_name = last_name
+        self.supplier_domains = supplier_domains or []
+        self.extra_keywords = extra_keywords or []
+
+    def get_info(self) -> str:
+        """Return human-readable context information."""
+        context_parts = []
+
+        if self.known_family_senders:
+            context_parts.append(
+                f"Known family senders: {', '.join(self.known_family_senders)}"
+            )
+
+        if self.known_friends_senders:
+            context_parts.append(
+                f"Known friends senders: {', '.join(self.known_friends_senders)}"
+            )
+
+        if self.last_name:
+            context_parts.append(f"User last name: {self.last_name}")
+
+        if self.supplier_domains:
+            context_parts.append(
+                f"Known supplier domains: {', '.join(self.supplier_domains)}"
+            )
+
+        if self.extra_keywords:
+            context_parts.append(
+                f"Additional keywords: {', '.join(self.extra_keywords)}"
+            )
+
+        return (
+            "\n".join(context_parts)
+            if context_parts
+            else "No specific context provided."
+        )
+
+
 # Define the LLM Client using GenAI instructor wrapper:
 client = instructor.from_genai(
     client=genai.Client(api_key=os.getenv("GEMINI_API_KEY")),
@@ -129,7 +211,7 @@ system_prompt_generator = SystemPromptGenerator(
     ],
 )
 
-# Define the agent
+# Define the order extraction agent
 order_extractor_agent = AtomicAgent[EmailInputSchema, OrderExtractionResult](
     config=AgentConfig(
         client=client,
@@ -140,9 +222,95 @@ order_extractor_agent = AtomicAgent[EmailInputSchema, OrderExtractionResult](
     )
 )
 
+# ============================================================================
+# EMAIL CATEGORIZATION AGENT SETUP
+# ============================================================================
+
+# Email categorization system prompt
+categorization_prompt = SystemPromptGenerator(
+    background=[
+        "You are an email categorization assistant that extracts fields and classifies emails.",
+        "Apply any provided dynamic context about known contacts and domains before analyzing.",
+    ],
+    steps=[
+        "First, apply the injected context about known family senders, friends, supplier domains, and keywords.",
+        "Extract the date, subject, sender, and body from the email data.",
+        "Classify the email into zero or more categories: Friends, Family, Suppliers, Job Applications, Events.",
+        "An email may have multiple categories or none at all.",
+        "If uncertain about categorization, leave the categories list empty rather than guessing.",
+    ],
+    output_instructions=[
+        "Return extracted fields (date, subject, sender, body) and a categories array.",
+        "Use null for any field that cannot be reliably extracted.",
+        "Categories must be exactly: Friends, Family, Suppliers, Job Applications, Events.",
+        "Return empty array for categories if uncertain.",
+    ],
+)
+
+# Create context provider with sample data (you can customize this)
+email_context = EmailContextProvider(
+    known_family_senders=["mom@example.com", "dad@example.com"],
+    known_friends_senders=["john@gmail.com", "sarah@yahoo.com"],
+    last_name="Wahlström",
+    supplier_domains=["bangerhead.se", "amazon.se", "madinter.com"],
+    extra_keywords=["meeting", "birthday", "interview"],
+)
+
+# Define the categorization agent
+categorization_agent = AtomicAgent[EmailInputSchema, EmailCategorizationResult](
+    config=AgentConfig(
+        client=client,
+        model="gemini-2.0-flash",
+        system_prompt_generator=categorization_prompt,
+        input_schema=EmailInputSchema,
+        output_schema=EmailCategorizationResult,
+    )
+)
+
+# Register context provider
+categorization_agent.register_context_provider("email_context", email_context)
+
 
 def main():
-    print("Starting email extraction...")
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Email processing with order extraction and/or categorization"
+    )
+    parser.add_argument(
+        "--orders", action="store_true", help="Run order extraction agent"
+    )
+    parser.add_argument(
+        "--categories", action="store_true", help="Run email categorization agent"
+    )
+    parser.add_argument(
+        "--query", default="orderbekräftelse", help="Gmail search query"
+    )
+    parser.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        help="Maximum number of emails to process",
+    )
+
+    args = parser.parse_args()
+
+    # Default to both if no specific agent is selected
+    if not args.orders and not args.categories:
+        args.orders = True
+        args.categories = True
+
+    print(f"Starting email processing...")
+    print(f"🔍 Query: '{args.query}'")
+    print(f"📊 Max results: {args.max_results}")
+    print(
+        f"🤖 Agents: {'Orders ' if args.orders else ''}{'Categories ' if args.categories else ''}"
+    )
+
+    # Get email data (using the query from args)
+    email_data = search_emails(
+        service, query=args.query, max_results=args.max_results, date_format="datetime"
+    )
+
     print(f"✅ Found {len(email_data)} emails to process")
 
     if not email_data:
@@ -151,53 +319,68 @@ def main():
 
     # Process each email in the search results
     for i, email in enumerate(email_data, 1):
-        print(f"\n{'='*60}")
+        print(f"\n{'='*80}")
         print(f"📧 Processing Email {i}/{len(email_data)}")
-        print(f"{'='*60}")
+        print(f"{'='*80}")
         print(f"Subject: {email['subject'][:80]}...")
         print(f"Sender: {email['sender'][:50]}...")
         print(f"Date: {email['date']}")
-
-        # Reset conversation history before processing each email
-        order_extractor_agent.reset_history()
 
         # Create analysis request for this email
         analysis_request = EmailInputSchema(
             sender=email["sender"],
             subject=email["subject"],
             body=email["body_text"],
-            date=email["date"],  # Already a datetime object from gmail_search.py!
+            date=email["date"],
         )
 
-        try:
-            # Process the email
-            analysis_result = order_extractor_agent.run(analysis_request)
+        # Run order extraction if requested
+        if args.orders:
+            print(f"\n--- 🛒 Order Analysis (Email {i}) ---")
+            try:
+                order_extractor_agent.reset_history()
+                order_result = order_extractor_agent.run(analysis_request)
 
-            # Display the results
-            print(f"\n--- Analysis Results (Email {i}) ---")
-            print(f"Is Order: {analysis_result.is_order}")
-            print(f"Supplier: {analysis_result.supplier}")
-            print(f"Total Amount: {analysis_result.total_amount}")
-            print(f"Currency: {analysis_result.currency}")
-            print(f"Confidence: {analysis_result.confidence}")
-            print(f"Reasoning: {analysis_result.reasoning}")
-
-            # Handle missing order date with clear indication
-            if analysis_result.order_date is None:
                 print(
-                    "Order Date: ❌ NOT FOUND - No date could be extracted from the email"
+                    f"Is Order: {'✅' if order_result.is_order else '❌'} {order_result.is_order}"
                 )
-            else:
-                print(f"Order Date: ✅ {analysis_result.order_date}")
+                print(f"Supplier: {order_result.supplier}")
+                print(f"Total Amount: {order_result.total_amount}")
+                print(f"Currency: {order_result.currency}")
+                print(f"Confidence: {order_result.confidence:.2f}")
+                print(f"Reasoning: {order_result.reasoning}")
 
-        except Exception as e:
-            print(f"❌ Analysis failed for email {i}")
-            print(e)
-            # continue  # Continue with next email instead of stopping
+                if order_result.order_date is None:
+                    print("Order Date: ❌ NOT FOUND")
+                else:
+                    print(f"Order Date: ✅ {order_result.order_date}")
 
-    print(f"\n{'='*60}")
+            except Exception as e:
+                print(f"❌ Order analysis failed: {e}")
+
+        # Run categorization if requested
+        if args.categories:
+            print(f"\n--- 🏷️ Categorization Analysis (Email {i}) ---")
+            try:
+                categorization_agent.reset_history()
+                cat_result = categorization_agent.run(analysis_request)
+
+                print(f"Date: {cat_result.date or '❌ NOT FOUND'}")
+                print(f"Subject: {cat_result.subject or '❌ NOT FOUND'}")
+                print(f"Sender: {cat_result.sender or '❌ NOT FOUND'}")
+                print(f"Body: {'✅ Found' if cat_result.body else '❌ NOT FOUND'}")
+
+                if cat_result.categories:
+                    print(f"Categories: ✅ {', '.join(cat_result.categories)}")
+                else:
+                    print("Categories: ❌ None identified")
+
+            except Exception as e:
+                print(f"❌ Categorization failed: {e}")
+
+    print(f"\n{'='*80}")
     print(f"✅ Completed processing {len(email_data)} emails")
-    print(f"{'='*60}")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":
